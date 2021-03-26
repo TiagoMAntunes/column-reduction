@@ -1,6 +1,10 @@
 #include <cuda.h>
 #include <iostream>
 #include <stdlib.h>
+#include <assert.h>
+
+#define CUDA_CHECK(status) (assert(status == cudaSuccess))
+
 
 int main(int argc, char * argv[])  {
     if (argc < 3) {
@@ -40,6 +44,31 @@ int main(int argc, char * argv[])  {
     //     printf("\n");
     // }
 
+    // allocate gpu memory
+    float * matrix_gpu, * device_result;
+    CUDA_CHECK(cudaMalloc(&matrix_gpu, sizeof(float) * m * n));
+    CUDA_CHECK(cudaMalloc(&device_result, sizeof(float) * m));
+    
+    // move matrix into gpu
+    CUDA_CHECK(cudaMemcpy(matrix_gpu, matrix, m * n * sizeof(float), cudaMemcpyHostToDevice));
+
+    // call kernel
+
+
+    // copy back results
+    CUDA_CHECK(cudaMemcpy(result_gpu, device_result, m * sizeof(float), cudaMemcpyDeviceToHost));
+    
+    // free gpu memory
+    CUDA_CHECK(cudaFree(matrix_gpu));
+    CUDA_CHECK(cudaFree(device_result));
+
+    // compare results
+    for (int i = 0; i < m; i++) {
+        if (result_cpu - result_gpu > 1e-6)
+            printf("INCORRECT RESULT\n");
+            break;
+    }
+    
     free(result_gpu);
     free(result_cpu);
     free(matrix);
