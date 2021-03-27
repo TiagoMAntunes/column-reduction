@@ -4,24 +4,31 @@
 #include <assert.h>
 
 #define CUDA_CHECK(status) (assert(status == cudaSuccess))
+#define threads_per_block 1024
 
-
-__global__ void column_reduce(float * matrix, float * result, int m /* lines */, int n /* rows*/) {
+__global__ void column_reduce(float * matrix, float * result, int m /* lines */, int n /* rows*/, int num_blocks_per_line) {
     extern __shared__ float sdata[];
     unsigned int tid = threadIdx.x;
-    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < m * n) sdata[tid] = matrix[i];
-    __syncthreads();
+    unsigned int curr_block_limit = (blockIdx.x == (num_blocks_per_line - 1)) ? n % threads_per_block : blockDim.x;
+    unsigned int line_block_idx = blockIdx.x % num_blocks_per_line;
+    //                        matrix line                  +        previous blocks in line     + id in block
+    unsigned int i = blockIdx.x / num_blocks_per_line  * n + line_block_idx * threads_per_block + threadIdx.x;
+    
+    if (threadIdx.x < curr_block_limit) {
+        // if (blockIdx.x != 0) printf("Thread %d Block %d has i=%d %d\n", threadIdx.x, blockIdx.x, i, curr_block_limit);
+        if (i < m * n) sdata[tid] = matrix[i];
+        __syncthreads();
 
-    for (unsigned int s = 1; s < blockDim.x; s *= 2) {
-        if (tid % (2*s) == 0) {
-            sdata[tid] += sdata[tid + s];
+        for (unsigned int s = 1; s < blockDim.x; s *= 2) {
+            if (tid % (2*s) == 0) {
+                sdata[tid] += sdata[tid + s];
+            }
+
+            __syncthreads();
         }
 
-        __syncthreads();
+        if (tid == 0) result[blockIdx.x] = sdata[0];
     }
-
-    if (tid == 0) result[blockIdx.x] = sdata[0];
 
 }
 
@@ -33,12 +40,17 @@ int main(int argc, char * argv[])  {
 
     int m = atoi(argv[1]), n = atoi(argv[2]);
     
+    int num_blocks_per_line = n / threads_per_block + (n % threads_per_block ? 1 : 0);
+    int tot_num_blocks = m * num_blocks_per_line;
+
+    printf("Running with %d threads per block, %d num blocks per line, %d tot number blocks\n", threads_per_block, num_blocks_per_line, tot_num_blocks);
+
     srand(time(NULL)); // seed 
 
     // create row-major matrix m x n
     float * matrix = (float *) malloc(sizeof(float) * m * n); // m x n
     // create array to store result
-    float * result_gpu = (float *) malloc(sizeof(float) * m); // m x 1
+    float * result_gpu = (float *) malloc(sizeof(float) * tot_num_blocks); // tot_num_blocks x 1
     float * result_cpu = (float *) malloc(sizeof(float) * m); // validation
 
     printf("Populating array \n");
@@ -70,16 +82,14 @@ int main(int argc, char * argv[])  {
     // allocate gpu memory
     float * matrix_gpu, * device_result;
     CUDA_CHECK(cudaMalloc(&matrix_gpu, sizeof(float) * m * n));
-    CUDA_CHECK(cudaMalloc(&device_result, sizeof(float) * m));
+    CUDA_CHECK(cudaMalloc(&device_result, sizeof(float) * tot_num_blocks));
     
     // move matrix into gpu
     CUDA_CHECK(cudaMemcpy(matrix_gpu, matrix, m * n * sizeof(float), cudaMemcpyHostToDevice));
 
     printf("Calling kernel\n");
     // call kernel
-    dim3 threadsPerBlock(n); // each block is a row in the matrix
-    dim3 numBlocks(m);
-    column_reduce<<<m, n, sizeof(float)*n>>>(matrix_gpu, device_result, m, n);
+    column_reduce<<<tot_num_blocks, threads_per_block, sizeof(float)*threads_per_block>>>(matrix_gpu, device_result, m, n, num_blocks_per_line);
 
     printf("Kernel launched. Waiting...\n");
     // Wait for kernel to finish
