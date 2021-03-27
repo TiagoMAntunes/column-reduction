@@ -9,11 +9,11 @@
 __global__ void column_reduce(float * matrix, float * result, int m /* lines */, int n /* rows*/, int num_blocks_per_line) {
     extern __shared__ float sdata[];
     unsigned int tid = threadIdx.x;
-    unsigned int curr_block_limit = (blockIdx.x == (num_blocks_per_line - 1)) ? n % threads_per_block : blockDim.x;
+    //                                  if last block of the line                   size of last block  else max blockdim
+    unsigned int curr_block_limit = (blockIdx.x == (num_blocks_per_line - 1)) ? n - (num_blocks_per_line - 1) * threads_per_block : blockDim.x;
     unsigned int line_block_idx = blockIdx.x % num_blocks_per_line;
     //                        matrix line                  +        previous blocks in line     + id in block
     unsigned int i = blockIdx.x / num_blocks_per_line  * n + line_block_idx * threads_per_block + threadIdx.x;
-    
     if (threadIdx.x < curr_block_limit) {
         // if (blockIdx.x != 0) printf("Thread %d Block %d has i=%d %d\n", threadIdx.x, blockIdx.x, i, curr_block_limit);
         if (i < m * n) sdata[tid] = matrix[i];
@@ -42,8 +42,6 @@ int main(int argc, char * argv[])  {
     
     int num_blocks_per_line = n / threads_per_block + (n % threads_per_block ? 1 : 0);
     int tot_num_blocks = m * num_blocks_per_line;
-
-    printf("Running with %d threads per block, %d num blocks per line, %d tot number blocks\n", threads_per_block, num_blocks_per_line, tot_num_blocks);
 
     srand(time(NULL)); // seed 
 
@@ -80,19 +78,48 @@ int main(int argc, char * argv[])  {
 
     printf("Allocating GPU memory\n");
     // allocate gpu memory
-    float * matrix_gpu, * device_result;
+    float * matrix_gpu, * device_result, * helper_result = NULL;
+
     CUDA_CHECK(cudaMalloc(&matrix_gpu, sizeof(float) * m * n));
     CUDA_CHECK(cudaMalloc(&device_result, sizeof(float) * tot_num_blocks));
     
     // move matrix into gpu
     CUDA_CHECK(cudaMemcpy(matrix_gpu, matrix, m * n * sizeof(float), cudaMemcpyHostToDevice));
 
-    printf("Calling kernel\n");
+    printf("Running with %d threads per block, %d num blocks per line, %d tot number blocks\n", threads_per_block, num_blocks_per_line, tot_num_blocks);
+
     // call kernel
     column_reduce<<<tot_num_blocks, threads_per_block, sizeof(float)*threads_per_block>>>(matrix_gpu, device_result, m, n, num_blocks_per_line);
+    
+    if (num_blocks_per_line != 1) {
+        // need to keep calling the kernel until the new values are calculated
+        printf("Allocating memory for extra array\n");
+        
+        CUDA_CHECK(cudaMalloc(&helper_result, sizeof(float) * tot_num_blocks));
 
-    printf("Kernel launched. Waiting...\n");
-    // Wait for kernel to finish
+
+        while (num_blocks_per_line != 1) {            
+            // swap the values
+            float * tmp;
+            tmp = device_result;
+            device_result = helper_result;
+            helper_result = tmp;
+
+            n = num_blocks_per_line;
+            num_blocks_per_line = n / threads_per_block + (n % threads_per_block ? 1 : 0);
+            tot_num_blocks = num_blocks_per_line * m;
+
+            // wait for last kernel to finish
+            CUDA_CHECK(cudaDeviceSynchronize());
+            printf("Running with %d threads per block, %d num blocks per line, %d tot number blocks, total of %d elements per line\n", threads_per_block, num_blocks_per_line, tot_num_blocks,n);
+            
+            // launch kernel again to reduce further
+            column_reduce<<<tot_num_blocks, threads_per_block, sizeof(float)*threads_per_block>>>(helper_result, device_result, m, num_blocks_per_line, num_blocks_per_line);
+        }
+
+    }
+
+    // Wait for final kernel to finish
     CUDA_CHECK(cudaDeviceSynchronize());
 
     printf("Kernel finished. Copying back results.\n");
@@ -102,12 +129,14 @@ int main(int argc, char * argv[])  {
     // free gpu memory
     CUDA_CHECK(cudaFree(matrix_gpu));
     CUDA_CHECK(cudaFree(device_result));
+    if (helper_result) CUDA_CHECK(cudaFree(helper_result));
     
     printf("Released GPU memory. Validating results...\n");
     // compare results
     for (int i = 0; i < m; i++) {
         if (result_cpu[i] - result_gpu[i] > 1e-4) 
             printf("INCORRECT RESULT: %.10f %.10f @ %d\n", result_cpu[i], result_gpu[i], i);
+        // else printf("Correect result! %f\n", result_cpu[i]);
     }
     
     free(result_gpu);
