@@ -69,8 +69,10 @@ int main(int argc, char * argv[])  {
     
 
     // printf("--- Result CPU ---\n");
+    // for (int i = 0; i < n; i++) 
+    //     printf("%0.10f ", result_cpu[i]);
+    // printf("\n\n");
     // for (int i = 0; i < m; i++) {
-    //     printf("%0.10f = ", result_cpu[i]);
     //     for (int j = 0; j < n; j++) {
     //         printf("%0.10f ", matrix[j + i * n]);
     //     }
