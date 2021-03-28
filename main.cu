@@ -8,15 +8,17 @@
 
 __global__ void column_reduce(float * matrix, float * result, int m /* lines */, int n /* columns*/) {
     extern __shared__ float sdata[];
-    unsigned int tid = threadIdx.x;
-    unsigned int i = blockIdx.x * n + threadIdx.x; // get to idx th line
+    unsigned int tid = threadIdx.x; // line
+    unsigned int i = blockIdx.x + threadIdx.x * n; // get to idx th line
     unsigned int offset = 0;
+    unsigned int it = n * blockDim.x; // advanced blockDim.x threads vertically
 
-    // sum all the values from that line to fit in one single block
+    // sum all the values from that column to fit in one single block
     sdata[tid] = 0;
-    while (tid + offset < n) {
+    while (i + offset < n*m) {
         sdata[tid] += matrix[i + offset];
-        offset += blockDim.x;
+        offset += it;  //TODO do i need a syncthreads() here for coalescing?
+        
     }
     __syncthreads();
 
@@ -46,9 +48,11 @@ int main(int argc, char * argv[])  {
 
     // create row-major matrix m x n
     float * matrix = (float *) malloc(sizeof(float) * m * n); // m x n
+
     // create array to store result
-    float * result_gpu = (float *) malloc(sizeof(float) * m); // tot_num_blocks x 1
-    float * result_cpu = (float *) malloc(sizeof(float) * m); // validation
+    float * result_gpu = (float *) malloc(sizeof(float) * n); // tot_num_blocks x 1
+    float * result_cpu = (float *) malloc(sizeof(float) * n); // validation
+    memset(result_cpu, 0, sizeof(float) * n);
 
     printf("Populating array \n");
     // populate the array 
@@ -58,13 +62,11 @@ int main(int argc, char * argv[])  {
 
     printf("Calculating final result\n");
     // calculate cpu result
-    for (int i = 0; i < m; i++) {
-        int row = i * n;
-        result_cpu[i] = 0;
-        for (int j = 0; j < n; j++) {
-            result_cpu[i] += matrix[j + row];
-        }
-    }
+    for (int i = 0; i < m; i++)
+        for (int j = 0; j < n; j++) 
+            result_cpu[j] += matrix[i * n + j];
+        
+    
 
     // printf("--- Result CPU ---\n");
     // for (int i = 0; i < m; i++) {
@@ -75,26 +77,27 @@ int main(int argc, char * argv[])  {
     //     printf("\n");
     // }
 
-    printf("Allocating GPU memory\n");
+    printf("Allocating GPU memory, m=%d, n=%d\n", m, n);
     // allocate gpu memory
     float * matrix_gpu, * device_result, * helper_result = NULL;
-
+    
     CUDA_CHECK(cudaMalloc(&matrix_gpu, sizeof(float) * m * n));
-    CUDA_CHECK(cudaMalloc(&device_result, sizeof(float) * m));
-    CUDA_CHECK(cudaMemset(device_result, 0, sizeof(float) * m));
-
+    CUDA_CHECK(cudaMalloc(&device_result, sizeof(float) * n));
+    CUDA_CHECK(cudaMemset(device_result, 0, sizeof(float) * n));
+    printf("Finished allocating. Copying matrix...\n");
     // move matrix into gpu
     CUDA_CHECK(cudaMemcpy(matrix_gpu, matrix, m * n * sizeof(float), cudaMemcpyHostToDevice));
 
+    printf("Calling kernel with m=%d n=%d\n", m, n);
     // call kernel
-    column_reduce<<<m, threads_per_block, sizeof(float)*threads_per_block>>>(matrix_gpu, device_result, m, n);
+    column_reduce<<<n, threads_per_block, sizeof(float)*threads_per_block>>>(matrix_gpu, device_result, m, n);
 
     // Wait for final kernel to finish
     CUDA_CHECK(cudaDeviceSynchronize());
 
     printf("Kernel finished. Copying back results.\n");
     // copy back results
-    CUDA_CHECK(cudaMemcpy(result_gpu, device_result, m * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(result_gpu, device_result, n * sizeof(float), cudaMemcpyDeviceToHost));
     
     // free gpu memory
     CUDA_CHECK(cudaFree(matrix_gpu));
@@ -103,8 +106,8 @@ int main(int argc, char * argv[])  {
     
     printf("Released GPU memory. Validating results...\n");
     // compare results
-    for (int i = 0; i < m; i++) {
-        if (abs(result_cpu[i] - result_gpu[i]) > 1e-4) 
+    for (int i = 0; i < n; i++) {
+        if (abs(result_cpu[i] - result_gpu[i]) > 1e-3) 
             printf("INCORRECT RESULT: %.10f %.10f @ %d, diff=%.10f\n", result_cpu[i], result_gpu[i], i, result_cpu[i] - result_gpu[i]);
         // else printf("Correct result! cpu=%.10f, gpu=%.10f, diff=%.10f\n", result_cpu[i], result_gpu[i], result_cpu[i] - result_gpu[i]);
     }
