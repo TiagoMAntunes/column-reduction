@@ -2,35 +2,46 @@
 #include <iostream>
 #include <stdlib.h>
 #include <assert.h>
+#include <chrono>
 
 #define CUDA_CHECK(status) (assert(status == cudaSuccess))
 #define threads_per_block 1024
 
 __global__ void column_reduce(float * matrix, float * result, int m /* lines */, int n /* columns*/) {
     extern __shared__ float sdata[];
-    unsigned int tid = threadIdx.x; // line
-    unsigned int i = blockIdx.x + threadIdx.x * n; // get to idx th line
+    unsigned int tid = threadIdx.x + threadIdx.y * blockDim.x; // line
+    unsigned int i = threadIdx.x * n + threadIdx.y + blockIdx.y * blockDim.y; // get to idx th line
     unsigned int offset = 0;
-    unsigned int it = n * blockDim.x; // advanced blockDim.x threads vertically
+    unsigned int it = n * blockDim.x; // advance blockDim.x threads vertically
+    unsigned int real_y = blockIdx.y * blockDim.y + threadIdx.y;
 
+    // if (threadIdx.x < m && threadIdx.y < n)
+    //     printf("Thread (%u,%u) has tid=%u and i=%u\n", threadIdx.x, threadIdx.y, tid, i);
     // sum all the values from that column to fit in one single block
     sdata[tid] = 0;
-    while (i + offset < n*m) {
-        sdata[tid] += matrix[i + offset];
-        offset += it;  //TODO do i need a syncthreads() here for coalescing?
-        
-    }
+    if (real_y < n && threadIdx.x < m) // remember we only have one x block
+        while (i + offset < n*m) {
+            sdata[tid] += matrix[i + offset];
+            offset += it; 
+            
+        }
     __syncthreads();
 
-    for (unsigned int s = 1; tid + s < blockDim.x; s *= 2) {
-        if (tid % (2*s) == 0) {
-            sdata[tid] += sdata[tid + s];
+    unsigned int lowest = blockDim.x > m ? m : blockDim.x;
+    if (real_y < n && threadIdx.x < m)
+        for (unsigned int s = 1; threadIdx.x + s < lowest; s *= 2) {
+            if (threadIdx.x % (2*s) == 0) {
+                // printf("Tid %u picking tid %u\n", tid, tid+s);
+                sdata[tid] += sdata[tid + s];
+            }
+
+            __syncthreads();
         }
 
-        __syncthreads();
+    if (threadIdx.x == 0 && real_y < n) {
+        // printf("Tid=%u writing to %u val=%0.10f\n", tid, real_y, sdata[tid]); 
+        result[real_y] = sdata[tid];
     }
-
-    if (tid == 0) {result[blockIdx.x] = sdata[0];}
 
 }
 
@@ -91,13 +102,16 @@ int main(int argc, char * argv[])  {
     CUDA_CHECK(cudaMemcpy(matrix_gpu, matrix, m * n * sizeof(float), cudaMemcpyHostToDevice));
 
     printf("Calling kernel with m=%d n=%d\n", m, n);
+    auto start = std::chrono::high_resolution_clock::now();
     // call kernel
-    column_reduce<<<n, threads_per_block, sizeof(float)*threads_per_block>>>(matrix_gpu, device_result, m, n);
-
+    dim3 block_threads(32, 32);
+    dim3 grid_threads(1, n / 32 + (n % 32 ? 1 : 0));
+    column_reduce<<<grid_threads, block_threads, sizeof(float)*threads_per_block>>>(matrix_gpu, device_result, m, n);
     // Wait for final kernel to finish
     CUDA_CHECK(cudaDeviceSynchronize());
-
-    printf("Kernel finished. Copying back results.\n");
+    auto end = std::chrono::high_resolution_clock::now();
+    printf("Running with (%u, %u)\n", grid_threads.x, grid_threads.y);
+    printf("Kernel finished. Took %ld ms. Copying back results.\n", std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count());
     // copy back results
     CUDA_CHECK(cudaMemcpy(result_gpu, device_result, n * sizeof(float), cudaMemcpyDeviceToHost));
     
