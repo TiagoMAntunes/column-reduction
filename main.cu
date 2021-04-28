@@ -15,8 +15,6 @@ __global__ void column_reduce(float * matrix, float * result, int m /* lines */,
     unsigned int it = n * blockDim.x; // advance blockDim.x threads vertically
     unsigned int real_y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    // if (threadIdx.x < m && threadIdx.y < n)
-    //     printf("Thread (%u,%u) has tid=%u and i=%u\n", threadIdx.x, threadIdx.y, tid, i);
     // sum all the values from that column to fit in one single block
     sdata[tid] = 0;
     if (real_y < n && threadIdx.x < m) // remember we only have one x block
@@ -31,7 +29,6 @@ __global__ void column_reduce(float * matrix, float * result, int m /* lines */,
     if (real_y < n && threadIdx.x < m)
         for (unsigned int s = 1; threadIdx.x + s < lowest; s *= 2) {
             if (threadIdx.x % (2*s) == 0) {
-                // printf("Tid %u picking tid %u\n", tid, tid+s);
                 sdata[tid] += sdata[tid + s];
             }
 
@@ -39,7 +36,6 @@ __global__ void column_reduce(float * matrix, float * result, int m /* lines */,
         }
 
     if (threadIdx.x == 0 && real_y < n) {
-        // printf("Tid=%u writing to %u val=%0.10f\n", tid, real_y, sdata[tid]); 
         result[real_y] = sdata[tid];
     }
 
@@ -111,7 +107,7 @@ int main(int argc, char * argv[])  {
     CUDA_CHECK(cudaDeviceSynchronize());
     auto end = std::chrono::high_resolution_clock::now();
     printf("Running with (%u, %u)\n", grid_threads.x, grid_threads.y);
-    printf("Kernel finished. Took %ld ms. Copying back results.\n", std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count());
+    printf("Kernel finished. Took %ld us. Copying back results.\n", std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
     // copy back results
     CUDA_CHECK(cudaMemcpy(result_gpu, device_result, n * sizeof(float), cudaMemcpyDeviceToHost));
     
