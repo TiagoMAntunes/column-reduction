@@ -11,35 +11,45 @@ __global__ void column_reduce(float * matrix, float * result, int m /* lines */,
     extern __shared__ float sdata[];
     unsigned int tid = threadIdx.x + threadIdx.y * blockDim.x; // line
     unsigned int i = threadIdx.x * n + threadIdx.y + blockIdx.y * blockDim.y; // get to idx th line
-    unsigned int offset = 0;
     unsigned int it = n * blockDim.x; // advance blockDim.x threads vertically
+    unsigned int offset = it;
     unsigned int real_y = blockIdx.y * blockDim.y + threadIdx.y;
+    unsigned int lowest = blockDim.x > m ? m : blockDim.x;
+
+    sdata[tid] = 0;
+
+    // special cases (borders and small matrices)
+    if (!(real_y < n && threadIdx.x < lowest))
+        return;
 
     // sum all the values from that column to fit in one single block
-    sdata[tid] = 0;
-    if (real_y < n && threadIdx.x < m) // remember we only have one x block
-        while (i + offset < n*m) {
-            sdata[tid] += matrix[i + offset];
-            offset += it; 
-            
-        }
+    sdata[tid] = matrix[i];
+    while (i + offset < n*m) {
+        sdata[tid] += matrix[i + offset];
+        offset += it; 
+    }
+
     __syncthreads();
 
-    unsigned int lowest = blockDim.x > m ? m : blockDim.x;
-    if (real_y < n && threadIdx.x < m)
-        for (unsigned int s = 1; threadIdx.x + s < lowest; s *= 2) {
-            if (threadIdx.x % (2*s) == 0) {
-                sdata[tid] += sdata[tid + s];
-            }
+    // find start value 
+    int start = blockDim.x;
+    while (start >> 1 >= lowest)
+        start >>= 1;
 
-            __syncthreads();
+    for (unsigned int s = start/2; s > 0; s>>=1) {
+        if (threadIdx.x < s) {
+            sdata[tid] += sdata[tid + s];
         }
+
+        __syncthreads();
+    }
 
     if (threadIdx.x == 0 && real_y < n) {
         result[real_y] = sdata[tid];
     }
 
 }
+
 
 int main(int argc, char * argv[])  {
     if (argc < 3) {
@@ -69,6 +79,7 @@ int main(int argc, char * argv[])  {
 
     printf("Calculating final result\n");
     auto cpu_start = std::chrono::high_resolution_clock::now();
+    
     // calculate cpu result
     for (int i = 0; i < m; i++)
         for (int j = 0; j < n; j++) 
