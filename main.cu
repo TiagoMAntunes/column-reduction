@@ -68,23 +68,15 @@ int main(int argc, char * argv[])  {
     
 
     printf("Calculating final result\n");
+    auto cpu_start = std::chrono::high_resolution_clock::now();
     // calculate cpu result
     for (int i = 0; i < m; i++)
         for (int j = 0; j < n; j++) 
             result_cpu[j] += matrix[i * n + j];
-        
-    
+    auto cpu_end = std::chrono::high_resolution_clock::now();
 
-    // printf("--- Result CPU ---\n");
-    // for (int i = 0; i < n; i++) 
-    //     printf("%0.10f ", result_cpu[i]);
-    // printf("\n\n");
-    // for (int i = 0; i < m; i++) {
-    //     for (int j = 0; j < n; j++) {
-    //         printf("%0.10f ", matrix[j + i * n]);
-    //     }
-    //     printf("\n");
-    // }
+    printf("CPU took %f ms.\n", std::chrono::duration_cast<std::chrono::microseconds>(cpu_end - cpu_start).count() / 1000.0);
+    
 
     printf("Allocating GPU memory, m=%d, n=%d\n", m, n);
     // allocate gpu memory
@@ -98,16 +90,25 @@ int main(int argc, char * argv[])  {
     CUDA_CHECK(cudaMemcpy(matrix_gpu, matrix, m * n * sizeof(float), cudaMemcpyHostToDevice));
 
     printf("Calling kernel with m=%d n=%d\n", m, n);
-    auto start = std::chrono::high_resolution_clock::now();
+    cudaEvent_t start, stop;
+    float elapsed_time;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
     // call kernel
     dim3 block_threads(32, 32);
     dim3 grid_threads(1, n / 32 + (n % 32 ? 1 : 0));
+
+    CUDA_CHECK(cudaEventRecord(start));
     column_reduce<<<grid_threads, block_threads, sizeof(float)*threads_per_block>>>(matrix_gpu, device_result, m, n);
+    CUDA_CHECK(cudaEventRecord(stop));
+
     // Wait for final kernel to finish
     CUDA_CHECK(cudaDeviceSynchronize());
-    auto end = std::chrono::high_resolution_clock::now();
-    printf("Running with (%u, %u)\n", grid_threads.x, grid_threads.y);
-    printf("Kernel finished. Took %ld us. Copying back results.\n", std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
+    // end = std::chrono::high_resolution_clock::now();
+    
+    cudaEventElapsedTime(&elapsed_time, start, stop);
+    printf("Kernel finished. Took %f ms. Copying back results.\n", elapsed_time);
     // copy back results
     CUDA_CHECK(cudaMemcpy(result_gpu, device_result, n * sizeof(float), cudaMemcpyDeviceToHost));
     
