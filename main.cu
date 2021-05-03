@@ -9,47 +9,42 @@
 
 __global__ void column_reduce(float * matrix, float * result, int m /* lines */, int n /* columns*/) {
     extern __shared__ float sdata[];
-    unsigned int tid = threadIdx.x + threadIdx.y * blockDim.x; // line
-    unsigned int i = threadIdx.x * n + threadIdx.y + blockIdx.y * blockDim.y; // get to idx th line
-    unsigned int it = n * blockDim.x; // advance blockDim.x threads vertically
+    unsigned int tid = threadIdx.x + threadIdx.y * blockDim.x;
+    unsigned int real_x = threadIdx.x + blockDim.x * blockIdx.x;
+    unsigned int real_y = n * threadIdx.y;
+    
+    unsigned int i = real_x + real_y;
+    unsigned int it = n*blockDim.y;
     unsigned int offset = it;
-    unsigned int real_y = blockIdx.y * blockDim.y + threadIdx.y;
-    unsigned int lowest = blockDim.x > m ? m : blockDim.x;
-
+    
     sdata[tid] = 0;
-
-    // special cases (borders and small matrices)
-    if (!(real_y < n && threadIdx.x < lowest))
-        return;
-
-    // sum all the values from that column to fit in one single block
-    sdata[tid] = matrix[i];
-    while (i + offset < n*m) {
-        sdata[tid] += matrix[i + offset];
-        offset += it; 
+    if (threadIdx.y < m && real_x < n) {
+        // can load memory
+        // printf("tid=%d loading %d\n", tid, i);
+        sdata[tid] = matrix[i];
+        while (i + offset < n*m) {
+            // printf("tid=%d loading %d\n", tid, i+offset);
+            sdata[tid] += matrix[i + offset];
+            offset += it;
+        }
     }
 
     __syncthreads();
-
-    // find start value 
-    int start = blockDim.x;
-    while (start >> 1 >= lowest)
-        start >>= 1;
-
-    for (unsigned int s = start/2; s > 0; s>>=1) {
-        if (threadIdx.x < s) {
-            sdata[tid] += sdata[tid + s];
+    
+    for (unsigned int s = blockDim.y / 2; s > 0; s>>=1) {
+        if (threadIdx.y < s) {
+            // printf("tid=%d adding %d\n", tid, tid + blockDim.x *s);
+            sdata[tid] += sdata[tid + blockDim.x * s];
         }
-
         __syncthreads();
     }
 
-    if (threadIdx.x == 0 && real_y < n) {
-        result[real_y] = sdata[tid];
+    if (threadIdx.y == 0 && real_x < n) {
+        result[real_x] = sdata[tid];
     }
 
+    
 }
-
 
 int main(int argc, char * argv[])  {
     if (argc < 3) {
@@ -100,7 +95,7 @@ int main(int argc, char * argv[])  {
     // move matrix into gpu
     CUDA_CHECK(cudaMemcpy(matrix_gpu, matrix, m * n * sizeof(float), cudaMemcpyHostToDevice));
 
-    printf("Calling kernel with m=%d n=%d\n", m, n);
+    
     cudaEvent_t start, stop;
     float elapsed_time;
     cudaEventCreate(&start);
@@ -108,7 +103,9 @@ int main(int argc, char * argv[])  {
 
     // call kernel
     dim3 block_threads(32, 32);
-    dim3 grid_threads(1, n / 32 + (n % 32 ? 1 : 0));
+    dim3 grid_threads(n / 32 + (n % 32 ? 1 : 0), 1);
+
+    printf("Calling kernel with m=%d n=%d, gridsize=(%d,%d)\n", m, n, grid_threads.x, grid_threads.y);
 
     CUDA_CHECK(cudaEventRecord(start));
     column_reduce<<<grid_threads, block_threads, sizeof(float)*threads_per_block>>>(matrix_gpu, device_result, m, n);
@@ -132,7 +129,7 @@ int main(int argc, char * argv[])  {
     // compare results
     for (int i = 0; i < n; i++) {
         if (abs(result_cpu[i] - result_gpu[i]) > 1e-3) 
-            printf("INCORRECT RESULT: %.10f %.10f @ %d, diff=%.10f\n", result_cpu[i], result_gpu[i], i, result_cpu[i] - result_gpu[i]);
+            printf("INCORRECT RESULT: cpu=%.10f gpu=%.10f @ index=%d, diff=%.10f\n", result_cpu[i], result_gpu[i], i, result_cpu[i] - result_gpu[i]);
         // else printf("Correct result! cpu=%.10f, gpu=%.10f, diff=%.10f\n", result_cpu[i], result_gpu[i], result_cpu[i] - result_gpu[i]);
     }
     
