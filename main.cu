@@ -7,9 +7,22 @@
 #define CUDA_CHECK(status) (assert(status == cudaSuccess))
 #define threads_per_block 1024
 
+
+__device__ void warpReduce(volatile float* sdata, int tid) {
+    // printf("Tid: %d\n", tid);
+    sdata[tid] += sdata[tid + 16];
+    sdata[tid] += sdata[tid + 8];
+    sdata[tid] += sdata[tid + 4];
+    sdata[tid] += sdata[tid + 2];
+    sdata[tid] += sdata[tid + 1];
+}
+
 __global__ void column_reduce(float * matrix, float * result, int m /* lines */, int n /* columns*/) {
     extern __shared__ float sdata[];
-    unsigned int tid = threadIdx.x + threadIdx.y * blockDim.x;
+    
+    unsigned int new_tid = threadIdx.x + threadIdx.y * blockDim.x;
+    unsigned int tid = threadIdx.y + threadIdx.x * blockDim.y;
+
     unsigned int real_x = threadIdx.x + blockDim.x * blockIdx.x;
     unsigned int real_y = n * threadIdx.y;
     
@@ -17,32 +30,31 @@ __global__ void column_reduce(float * matrix, float * result, int m /* lines */,
     unsigned int it = n*blockDim.y;
     unsigned int offset = it;
     
-    sdata[tid] = 0;
+    float accumulator = 0;
+
     if (threadIdx.y < m && real_x < n) {
         // can load memory
-        // printf("tid=%d loading %d\n", tid, i);
-        sdata[tid] = matrix[i];
+        // printf("tid=%d loading %d\n", new_tid, i);
+        accumulator = matrix[i];
         while (i + offset < n*m) {
-            // printf("tid=%d loading %d\n", tid, i+offset);
-            sdata[tid] += matrix[i + offset];
+            // printf("tid=%d loading %d\n", new_tid, i+offset);
+            accumulator += matrix[i + offset];
             offset += it;
         }
     }
 
+    new_tid += (new_tid / 16) * 16;
+    
+    // printf("Tid=%d writing to %d\n", new_tid, tid);
+    sdata[tid] = accumulator;
+    __syncthreads();
+
+    if (new_tid < 32 * 32 - 16) 
+        warpReduce(sdata, new_tid);
     __syncthreads();
     
-    for (unsigned int s = blockDim.y / 2; s > 0; s>>=1) {
-        if (threadIdx.y < s) {
-            // printf("tid=%d adding %d\n", tid, tid + blockDim.x *s);
-            sdata[tid] += sdata[tid + blockDim.x * s];
-        }
-        __syncthreads();
-    }
-
-    if (threadIdx.y == 0 && real_x < n) {
+    if (threadIdx.y == 0 && real_x < n) 
         result[real_x] = sdata[tid];
-    }
-
     
 }
 
@@ -54,7 +66,7 @@ int main(int argc, char * argv[])  {
 
     int m = atoi(argv[1]), n = atoi(argv[2]);
     
-    unsigned long seed = time(NULL);
+    unsigned long seed = 1620144156; //time(NULL);
     srand(seed); // seed 
     printf("Running with seed %ld\n", seed);
 
@@ -108,7 +120,7 @@ int main(int argc, char * argv[])  {
     printf("Calling kernel with m=%d n=%d, gridsize=(%d,%d)\n", m, n, grid_threads.x, grid_threads.y);
 
     CUDA_CHECK(cudaEventRecord(start));
-    column_reduce<<<grid_threads, block_threads, sizeof(float)*threads_per_block>>>(matrix_gpu, device_result, m, n);
+    column_reduce<<<grid_threads, block_threads, sizeof(float)*32*33>>>(matrix_gpu, device_result, m, n);
     CUDA_CHECK(cudaEventRecord(stop));
 
     // Wait for final kernel to finish
