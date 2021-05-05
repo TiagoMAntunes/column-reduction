@@ -8,8 +8,11 @@
 #define threads_per_block 1024
 
 
-__device__ void warpReduce(volatile float* sdata, int tid) {
-    // printf("Tid: %d\n", tid);
+// sum the shared data reductions into a single one
+// loop unrolled version for increased performance
+// Note: do not remove volatile!
+// Note: some redudant calculation is done due to bank conflicts / sleeping threads
+__device__ void columnWarpReduce(volatile float* sdata, int tid) {
     sdata[tid] += sdata[tid + 16];
     sdata[tid] += sdata[tid + 8];
     sdata[tid] += sdata[tid + 4];
@@ -20,41 +23,41 @@ __device__ void warpReduce(volatile float* sdata, int tid) {
 __global__ void column_reduce(float * matrix, float * result, int m /* lines */, int n /* columns*/) {
     extern __shared__ float sdata[];
     
-    unsigned int new_tid = threadIdx.x + threadIdx.y * blockDim.x;
-    unsigned int tid = threadIdx.y + threadIdx.x * blockDim.y;
+    // normal tid
+    int tid = threadIdx.x + threadIdx.y * blockDim.x;
+    
+    // transposed tid for shared memory
+    int new_tid = threadIdx.y + threadIdx.x * blockDim.y;
 
-    unsigned int real_x = threadIdx.x + blockDim.x * blockIdx.x;
-    unsigned int real_y = n * threadIdx.y;
+    // true x value in the matrix
+    int real_x = threadIdx.x + blockDim.x * blockIdx.x;
     
-    unsigned int i = real_x + real_y;
-    unsigned int it = n*blockDim.y;
-    unsigned int offset = it;
-    
+    int i = real_x + n * threadIdx.y;
+    const int it = n*blockDim.y;
+    int offset = it;
     float accumulator = 0;
 
     if (threadIdx.y < m && real_x < n) {
-        // can load memory
-        // printf("tid=%d loading %d\n", new_tid, i);
+        // store all the values from this column in a warped way
         accumulator = matrix[i];
         while (i + offset < n*m) {
-            // printf("tid=%d loading %d\n", new_tid, i+offset);
             accumulator += matrix[i + offset];
             offset += it;
         }
     }
 
-    new_tid += (new_tid / 16) * 16;
-    
-    // printf("Tid=%d writing to %d\n", new_tid, tid);
-    sdata[tid] = accumulator;
+    // save column reduction data in a transposed way
+    sdata[new_tid] = accumulator;
     __syncthreads();
 
-    if (new_tid < 32 * 32 - 16) 
-        warpReduce(sdata, new_tid);
+    // avoid last warp to run causing memory errors
+    if (tid < 32 * 32 - 16) { 
+        columnWarpReduce(sdata, tid);
+    }
     __syncthreads();
     
     if (threadIdx.y == 0 && real_x < n) 
-        result[real_x] = sdata[tid];
+        result[real_x] = sdata[new_tid];
     
 }
 
@@ -120,7 +123,7 @@ int main(int argc, char * argv[])  {
     printf("Calling kernel with m=%d n=%d, gridsize=(%d,%d)\n", m, n, grid_threads.x, grid_threads.y);
 
     CUDA_CHECK(cudaEventRecord(start));
-    column_reduce<<<grid_threads, block_threads, sizeof(float)*32*33>>>(matrix_gpu, device_result, m, n);
+    column_reduce<<<grid_threads, block_threads, sizeof(float)*32*32>>>(matrix_gpu, device_result, m, n);
     CUDA_CHECK(cudaEventRecord(stop));
 
     // Wait for final kernel to finish
